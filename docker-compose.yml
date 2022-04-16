@@ -1,0 +1,13 @@
+version: "3.8"
+
+services:
+    securitycodescanner:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        image: securitycodescanner
+        container_name: securitycodescanner
+        command: /bin/bash
+        tty: true
+        volumes:
+            - .:/securitycodescanner
