@@ -5,10 +5,10 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/fgmaia/securitycodescanner/internal/customtypes"
 	"github.com/fgmaia/securitycodescanner/internal/domain"
+	"github.com/fgmaia/securitycodescanner/pkg/realtime"
 )
 
 /*
@@ -43,11 +43,13 @@ func (s *crossSiteScriptScan) Execute(ctx context.Context, file string, data str
 			return outputs, errors.New("deadline is exceeded")
 		}
 
-		if strings.Contains(line, "alert(") {
+		lineLower := strings.ToLower(line)
+
+		if strings.Contains(lineLower, "alert(") {
 			output := domain.ScanFileOutput{
-				Line:    i,
-				Data:    line,
-				FoundAt: time.Now(),
+				Line:    i + 1,
+				Data:    strings.Trim(line, " "),
+				FoundAt: realtime.Now(),
 			}
 			outputs = append(outputs, output)
 		}

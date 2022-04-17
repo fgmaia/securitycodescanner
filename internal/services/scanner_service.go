@@ -4,98 +4,105 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
-	"os"
-	"path/filepath"
-	"time"
+	"sync"
 
 	"github.com/fgmaia/securitycodescanner/internal/customtypes"
 	"github.com/fgmaia/securitycodescanner/internal/domain"
+	"github.com/fgmaia/securitycodescanner/internal/filesearch"
 	"github.com/fgmaia/securitycodescanner/internal/scanners"
+	"github.com/fgmaia/securitycodescanner/pkg/realtime"
+	"golang.org/x/sync/errgroup"
 )
 
 type scannerService struct {
+	maxParallel int
+	fileSearch  filesearch.FileSearch
+	scanType    customtypes.ScanType
+	scans       []scanners.Scan
+	mu          sync.Mutex
 }
 
-func NewScannerService() ScannerService {
-	return &scannerService{}
+func NewScannerService(fileSearch filesearch.FileSearch,
+	maxParallel int,
+	scanType customtypes.ScanType,
+	scans ...scanners.Scan) ScannerService {
+
+	return &scannerService{
+		fileSearch:  fileSearch,
+		maxParallel: maxParallel,
+		scanType:    scanType,
+		scans:       scans,
+	}
 }
 
-func (s *scannerService) Execute(ctx context.Context, path string, scanType customtypes.ScanType) (domain.ScanResult, error) {
+func (s *scannerService) Execute(ctx context.Context, path string) (domain.ScanResult, error) {
 	fmt.Printf("Start Scanning")
 
-	scans := make([]scanners.Scan, 0, 1)
-
-	switch scanType {
-	case customtypes.ScanTypeFull:
-		scans = append(scans, scanners.NewCrossSiteScriptScan())
-		scans = append(scans, scanners.NewSensitiveDataExposureScan())
-		scans = append(scans, scanners.NewSqlInjection())
-
-	case customtypes.ScanTypeCrossSiteScripting:
-		scans = append(scans, scanners.NewCrossSiteScriptScan())
-
-	case customtypes.ScanTypeCrossSqlInjection:
-		scans = append(scans, scanners.NewSqlInjection())
-
-	case customtypes.ScanTypeSensitiveDataExposure:
-		scans = append(scans, scanners.NewSensitiveDataExposureScan())
+	scanResult := domain.ScanResult{
+		StartAt: realtime.Now(),
+		Path:    path,
 	}
 
-	scanResult := &domain.ScanResult{}
-	err := s.processFiles(ctx, scanResult, path, scans...)
-	if err != nil {
-		return *scanResult, err
-	}
+	var sema = make(chan struct{}, s.maxParallel)
+	errorgroup, ctx := errgroup.WithContext(ctx)
 
-	return *scanResult, nil
-}
-
-func (s *scannerService) processFiles(ctx context.Context, scanResult *domain.ScanResult, path string, scans ...scanners.Scan) error {
-
-	files, err := ioutil.ReadDir(path)
-	if err != nil {
-		return err
-	}
-
-	var scanFiles []domain.ScanFile
-	for _, file := range files {
-
+	chFiles := s.fileSearch.Execute(ctx, path)
+	total := 0
+	for fileScan := range chFiles {
+		total++
+		fileScan := fileScan
 		if ctx.Err() == context.Canceled {
-			return errors.New("canceled")
+			return scanResult, errors.New("canceled")
 		}
 
 		if ctx.Err() == context.DeadlineExceeded {
-			return errors.New("deadline is exceeded")
+			return scanResult, errors.New("deadline is exceeded")
 		}
 
-		if !file.IsDir() {
-			if err := s.processFiles(ctx, scanResult, filepath.Join(path, file.Name()), scans...); err != nil {
-				return err
-			}
-		} else {
-			scanFiles, err = s.processFile(ctx, filepath.Join(path, file.Name()), scans...)
+		if fileScan.Error != nil {
+			return scanResult, fileScan.Error
+		}
+
+		f := func() error {
+			sema <- struct{}{}        // acquire token
+			defer func() { <-sema }() //release token
+
+			scannedFiles, err := s.processFile(ctx, fileScan.File, fileScan.Data)
 			if err != nil {
 				return err
 			}
-			scanResult.Files = append(scanResult.Files, scanFiles...)
+
+			if len(scannedFiles) > 0 {
+				t := 0
+				for _, s := range scannedFiles {
+					t += s.VulnerabilitiesFound
+				}
+				s.mu.Lock()
+				scanResult.Files = append(scanResult.Files, scannedFiles...)
+				scanResult.VulnerabilitiesFound += t
+				s.mu.Unlock()
+			}
+			return nil
 		}
+		errorgroup.Go(f)
+
 	}
 
-	return nil
+	err := errorgroup.Wait()
+	if err != nil {
+		return scanResult, err
+	}
+
+	scanResult.EndAt = realtime.Now()
+	scanResult.TotalScannedFiles = total
+
+	return scanResult, nil
 }
 
-func (s *scannerService) processFile(ctx context.Context, file string, scans ...scanners.Scan) ([]domain.ScanFile, error) {
+func (s *scannerService) processFile(ctx context.Context, file string, data string) ([]domain.ScanFile, error) {
 	var scanFiles []domain.ScanFile
-	//
 
-	content, err := os.ReadFile("file.txt")
-	if err != nil {
-		return scanFiles, err
-	}
-	data := string(content)
-
-	for _, scan := range scans {
+	for _, scan := range s.scans {
 		if ctx.Err() == context.Canceled {
 			return scanFiles, errors.New("canceled")
 		}
@@ -103,26 +110,37 @@ func (s *scannerService) processFile(ctx context.Context, file string, scans ...
 		if ctx.Err() == context.DeadlineExceeded {
 			return scanFiles, errors.New("deadline is exceeded")
 		}
-		s.processData(ctx, file, data, scan)
+		scans, err := s.processData(ctx, file, data, scan)
+		if err != nil {
+			return scanFiles, err
+		}
+		if scans != nil {
+			scanFiles = append(scanFiles, *scans)
+		}
 	}
 
 	return scanFiles, nil
 }
 
-func (s *scannerService) processData(ctx context.Context, file string, data string, scan scanners.Scan) (domain.ScanFile, error) {
+func (s *scannerService) processData(ctx context.Context, file string, data string, scan scanners.Scan) (*domain.ScanFile, error) {
 	scanFile := domain.ScanFile{
 		File:     file,
 		ScanType: scan.GetType(),
-		StartAt:  time.Now(),
+		StartAt:  realtime.Now(),
 	}
 
 	scanOutputs, err := scan.Execute(ctx, file, data)
-	scanFile.EndAt = time.Now()
+	scanFile.EndAt = realtime.Now()
 	if err != nil {
-		return scanFile, err
+		return nil, err
 	}
+
+	if len(scanOutputs) == 0 {
+		return nil, nil
+	}
+
 	scanFile.Output = scanOutputs
 	scanFile.VulnerabilitiesFound = len(scanOutputs)
 
-	return scanFile, nil
+	return &scanFile, nil
 }

@@ -11,6 +11,9 @@ RUN wget https://go.dev/dl/go1.18.linux-amd64.tar.gz
 RUN tar -C /usr/lib -xzf go1.18.linux-amd64.tar.gz
 RUN rm -rf go1.18.linux-amd64.tar.gz
 
+ENV GOPATH /go-path
+ENV PATH $PATH:/usr/local/go/bin:$GOPATH/bin:/usr/local/go/bin
+
 ENV APP_HOME /securitycodescanner
 
 ENV PATH=/usr/lib/go/bin:$PATH
@@ -22,6 +25,6 @@ ADD . $APP_HOME
 RUN echo $PATH
 RUN go mod download
 
-COPY . /task
+COPY . /securitycodescanner
 
 CMD ["/bin/bash"]

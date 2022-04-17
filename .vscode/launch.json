@@ -10,7 +10,7 @@
             "request": "launch",
             "mode": "auto",
             "program": "${fileDirname}",
-            "args": ["path=c:\\temp"]
+            "args": ["-path", "D:\\Onedrive\\projetos\\plusit\\FourAnyBody", "-type","0","-format","text"]
         }
     ]
 }

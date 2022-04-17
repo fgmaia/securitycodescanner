@@ -8,7 +8,7 @@ compose-up:
 	docker-compose up -d
 
 docker-exec:
-	docker exec -it task /bin/bash
+	docker exec -it securitycodescanner /bin/bash
 
 mockary:
 	~/go/bin/mockery --all

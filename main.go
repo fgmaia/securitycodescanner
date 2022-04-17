@@ -8,41 +8,20 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
-	"github.com/briandowns/spinner"
 	"github.com/fgmaia/securitycodescanner/internal/customtypes"
+	"github.com/fgmaia/securitycodescanner/internal/filesearch"
+	"github.com/fgmaia/securitycodescanner/internal/scanners"
+	"github.com/fgmaia/securitycodescanner/internal/serializers"
 	"github.com/fgmaia/securitycodescanner/internal/services"
 )
 
-/*
-Security Code Scanner
-	In answering the code exercise, Golang is encouraged, but any high-level language will do.
-	Description:
-		Create a console application that mimics a security code scanner.
-		The application [accepts path to the source code] and [scan configuration in the parameters], performs
-		security analysis and prints report to output.
-
-		[There are 3 types of security checks and adding the [additional types should be simple.]
-
-		1) Cross site scripting
-			Check that there are no html or JavaScript files with following statement:
-			Alert()
-
-		2) Sensitive data exposure.
-			Check that there are no files with following strings on a same line:
-			“Checkmarx” “Hellman & Friedman” “$1.15b”
-
-		3) SQL injection
-			Check that there are no files
-			with statements starting with quotes, containing SELECT, WHERE, %s and ending with quotes
-			e.g. "…. SELECT …. WHERE …. %s …. "
-			There are 2 supported output formats and adding the additional formats should be simple.
-
-	1) Plain text with vulnerability per line e.g. [SQL injection] in file “DB.go” on line 45
-
-	2) Json representing the same information
-*/
+type CodeScanner struct {
+	Path         string
+	ScanType     customtypes.ScanType
+	Scans        []scanners.Scan
+	OutputFormat string
+}
 
 func main() {
 
@@ -58,61 +37,103 @@ func main() {
 		}
 	}()
 
-	var path string
-	flag.StringVar(&path, "path", "", "file path to scan")
+	codeScanner := loadParams()
+	start(ctx, codeScanner)
+}
+
+func loadParams() CodeScanner {
+	codeScanner := CodeScanner{}
+
+	flag.StringVar(&codeScanner.Path, "path", "", "file path to scan")
 
 	var st int
 	flag.IntVar(&st, "type", 0, "scan type:\n 0: full scan \n 1: cross site scripting \n 2: sensitive data exposure \n 3: cross sql injection")
-	scanType := customtypes.ScanType(st)
+	codeScanner.ScanType = customtypes.ScanType(st)
 
-	var outputFormat string
-	flag.StringVar(&outputFormat, "format", "json", "output format json|text")
+	flag.StringVar(&codeScanner.OutputFormat, "format", "json", "output format json|text")
 
 	flag.Parse()
 
-	if len(path) == 0 {
+	if len(codeScanner.Path) == 0 {
 		fmt.Println("Usage: securitycodescanner -path /path/to/scanner -type 0|1|2|3 -format json|text")
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
-	if scanType > customtypes.ScanTypeCrossSqlInjection {
-		scanType = customtypes.ScanTypeFull
+	if codeScanner.ScanType > customtypes.ScanTypeSqlInjection {
+		codeScanner.ScanType = customtypes.ScanTypeFull
 	}
 
-	if outputFormat != "json" && outputFormat != "text" {
-		log.Fatal("invalid output format: ", outputFormat)
+	if codeScanner.OutputFormat != "json" && codeScanner.OutputFormat != "text" {
+		log.Fatal("invalid output format: ", codeScanner.OutputFormat)
 	}
 
-	s := spinner.New(spinner.CharSets[35], 800*time.Millisecond) // Build our new spinner
-
-	fmt.Println("scanning path: ", path)
+	fmt.Println("scanning path: ", codeScanner.Path)
 	fmt.Printf("scan type: ")
 
-	switch scanType {
+	scans := make([]scanners.Scan, 0, 1)
+
+	switch codeScanner.ScanType {
 	case customtypes.ScanTypeFull:
 		fmt.Printf("Full")
+		scans = append(scans, scanners.NewCrossSiteScriptScan())
+		scans = append(scans, scanners.NewSensitiveDataExposureScan())
+		scans = append(scans, scanners.NewSqlInjection())
+
 	case customtypes.ScanTypeCrossSiteScripting:
 		fmt.Printf("Cross Site Scripting")
+		scans = append(scans, scanners.NewCrossSiteScriptScan())
+
 	case customtypes.ScanTypeSensitiveDataExposure:
 		fmt.Printf("Sensitive Data Exposure")
-	case customtypes.ScanTypeCrossSqlInjection:
+		scans = append(scans, scanners.NewSensitiveDataExposureScan())
+
+	case customtypes.ScanTypeSqlInjection:
 		fmt.Printf("Cross Sql Injection")
+		scans = append(scans, scanners.NewSqlInjection())
 	}
 
-	fmt.Println("output format: ", outputFormat)
+	codeScanner.Scans = scans
+
+	fmt.Println("")
+	fmt.Println("output format: ", codeScanner.OutputFormat)
 	fmt.Println("")
 
-	s.Start()
-	defer s.Stop()
+	return codeScanner
+}
 
-	scanner := services.NewScannerService()
-	scanResult, err := scanner.Execute(ctx, path, scanType)
+func start(ctx context.Context, codeScanner CodeScanner) {
+	fileSearch := filesearch.NewFileSearch(50)
+	scanner := services.NewScannerService(fileSearch, 20, codeScanner.ScanType, codeScanner.Scans...)
+
+	scanResult, err := scanner.Execute(ctx, codeScanner.Path)
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	var serializer serializers.Serializer
+	var file string
+	if codeScanner.OutputFormat == "json" {
+		serializer = serializers.NewResultJson()
+		file = "result.json"
+	} else if codeScanner.OutputFormat == "text" {
+		serializer = serializers.NewResultText()
+		file = "result.txt"
+	}
+
+	fmt.Println("------------------------")
+	fmt.Println("Path: ", scanResult.Path)
+	fmt.Println("Files Scanned: ", scanResult.TotalScannedFiles)
+	fmt.Println("Vulnerabilities Found: ", scanResult.VulnerabilitiesFound)
 	fmt.Println(scanResult.StartAt)
 	fmt.Println(scanResult.EndAt)
+	fmt.Println("Result File: ", file)
+	fmt.Println("------------------------")
+
+	err = serializer.Execute(ctx, scanResult, file)
+
+	if err != nil {
+		log.Fatal(err)
+	}
 
 }

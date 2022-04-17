@@ -8,6 +8,6 @@ import (
 )
 
 type Scan interface {
-	Execute(ctx context.Context, file string, data string) (*[]domain.ScanFileOutput, error)
+	Execute(ctx context.Context, file string, data string) ([]domain.ScanFileOutput, error)
 	GetType() customtypes.ScanType
 }
