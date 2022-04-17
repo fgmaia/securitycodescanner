@@ -26,7 +26,7 @@ There are 2 supported output formats and adding the additional formats should be
 ### Running locally
 ```bash
 make run
-
+```
 ### Running tests locally
 ```bash
 make test
